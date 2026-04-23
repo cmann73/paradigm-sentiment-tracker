@@ -4,11 +4,8 @@ const API = process.env.CENTAUR_API_URL || 'https://svc-ai.dayno.xyz';
 const KEY = process.env.CENTAUR_API_KEY || '';
 
 async function centaurFetch(path: string, body?: object) {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (KEY) headers['X-Api-Key'] = KEY;
-
   const res = await fetch(`${API}${path}`, {
     method: body ? 'POST' : 'GET',
     headers,
@@ -19,148 +16,109 @@ async function centaurFetch(path: string, body?: object) {
 
 async function runAgent(prompt: string): Promise<string> {
   const threadKey = `sentiment-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
-  const spawn = await centaurFetch('/agent/spawn', {
-    thread_key: threadKey,
-    harness: 'amp',
-  });
+  const spawn = await centaurFetch('/agent/spawn', { thread_key: threadKey, harness: 'amp' });
   const ag = spawn.assignment_generation;
-
   await centaurFetch('/agent/message', {
-    thread_key: threadKey,
-    assignment_generation: ag,
-    role: 'user',
-    parts: [{ type: 'text', text: prompt }],
+    thread_key: threadKey, assignment_generation: ag,
+    role: 'user', parts: [{ type: 'text', text: prompt }],
   });
-
   const execute = await centaurFetch('/agent/execute', {
-    thread_key: threadKey,
-    assignment_generation: ag,
-    harness: 'amp',
-    delivery: { platform: 'dev' },
+    thread_key: threadKey, assignment_generation: ag,
+    harness: 'amp', delivery: { platform: 'dev' },
   });
   const executionId = execute.execution_id;
-
-  // Poll for completion
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < 40; i++) {
     await new Promise(r => setTimeout(r, 3000));
     const status = await centaurFetch(`/agent/executions/${executionId}`);
-    if (status.status === 'completed') {
-      return status.result_text || '';
-    }
-    if (['failed', 'cancelled'].includes(status.status)) {
-      throw new Error(`Agent ${status.status}`);
-    }
+    if (status.status === 'completed') return status.result_text || '';
+    if (['failed', 'cancelled'].includes(status.status)) throw new Error(`Agent ${status.status}`);
   }
   throw new Error('Agent timed out');
 }
 
-function parseJsonFromText(text: string): object | null {
+function parseJson(text: string): Record<string, unknown> | null {
   const match = text.match(/```json\n?([\s\S]*?)```/) || text.match(/(\{[\s\S]*\})/);
   if (!match) return null;
-  try {
-    return JSON.parse(match[1]);
-  } catch {
-    return null;
-  }
+  try { return JSON.parse(match[1]); } catch { return null; }
 }
 
-export async function GET() {
-  try {
-    const PARADIGM_PROMPT = `Search Twitter/X and the web for recent mentions of @paradigm (Paradigm the crypto VC firm) from the last 30 days.
+function buildPrompt(target: string, isExec: boolean) {
+  const label = isExec ? 'Matt Huang (co-founder and managing partner of Paradigm crypto VC firm)' : '@paradigm (Paradigm the crypto VC firm)';
+  const sources = 'Twitter/X, Reddit (r/cryptocurrency, r/ethfinance, r/defi), CoinDesk, The Block, and general web search';
+  return `Search ${sources} for mentions of ${label} from the last 30 days.
 
-Analyze the sentiment and return a JSON object with this exact structure:
+Analyze sentiment and return ONLY a JSON object with this exact structure (no other text):
 {
-  "target": "Paradigm (@paradigm)",
-  "period": "Last 30 days",
-  "total_mentions": <number>,
-  "unique_accounts": <number>,
-  "sentiment_breakdown": {
-    "positive": <percentage 0-100>,
-    "neutral": <percentage 0-100>,
-    "negative": <percentage 0-100>
+  "target": "${target}",
+  "stats": {
+    "total_mentions": <number>,
+    "unique_accounts": <number>,
+    "avg_sentiment": <number between -1 and 1>,
+    "threat_counts": { "critical": <n>, "high": <n>, "medium": <n>, "low": <n> },
+    "daily_data": [
+      { "date": "YYYY-MM-DD", "count": <n>, "unique_accounts": <n>, "high_severity_count": <n>, "alerts_count": <n>, "avg_sentiment": <-1 to 1> }
+      ... 30 entries, one per day for the past 30 days
+    ],
+    "source_breakdown": [
+      { "source": "reddit", "count": <n>, "avg_sentiment": <-1 to 1> },
+      { "source": "twitter", "count": <n>, "avg_sentiment": <-1 to 1> },
+      { "source": "news_coindesk", "count": <n>, "avg_sentiment": <-1 to 1> },
+      { "source": "news_theblock", "count": <n>, "avg_sentiment": <-1 to 1> }
+    ]
   },
-  "severity_counts": {
-    "high": <number of high-severity negative mentions>,
-    "medium": <number>,
-    "low": <number>,
-    "alerts": <number of urgent/threatening mentions>
-  },
-  "top_themes": [
-    {"theme": "<theme name>", "sentiment": "positive|neutral|negative", "count": <number>},
-    ...up to 6 themes
+  "high_severity_mentions": [
+    {
+      "id": <n>, "source": "reddit|twitter|news_coindesk|news_theblock",
+      "title": "<title or null>", "content": "<excerpt>",
+      "url": "<url>", "published_at": "<ISO date>",
+      "severity_score": <1-10>, "sentiment_score": <-1 to 1>,
+      "threat_level": "critical|high|medium|low|none",
+      "threat_keywords": ["<word>"], "employee_mentions": ["<name>"]
+    }
+    ... up to 5 high severity mentions
   ],
-  "recent_highlights": [
-    {"text": "<short quote or summary>", "sentiment": "positive|neutral|negative", "source": "Twitter|Reddit|News", "date": "<date>"},
-    ...up to 5 highlights
+  "alerts": [
+    {
+      "id": <n>, "mention_id": <n>, "alert_level": "critical|high|medium",
+      "alert_reason": "<reason>", "is_reviewed": false,
+      "created_at": "<ISO date>"
+    }
+    ... up to 5 alerts
   ],
-  "trend_summary": "<2-3 sentence summary of how sentiment has trended this month>"
+  "recent_mentions": [
+    {
+      "id": <n>, "source": "reddit|twitter|news_coindesk|news_theblock",
+      "title": "<title or null>", "content": "<excerpt>",
+      "url": "<url>", "published_at": "<ISO date>",
+      "severity_score": <1-10>, "sentiment_score": <-1 to 1>,
+      "threat_level": "none|low|medium|high",
+      "threat_keywords": [], "employee_mentions": []
+    }
+    ... up to 20 recent mentions
+  ],
+  "threat_keywords": [
+    { "keyword": "<word>", "count": <n> }
+    ... top 5 threat keywords found
+  ],
+  "employee_mentions": [
+    { "name": "<person>", "count": <n>, "sentiment": <-1 to 1> }
+    ... up to 5 people mentioned
+  ]
+}`;
 }
 
-Return ONLY the JSON object, no other text.`;
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const target = searchParams.get('target') || 'paradigm';
+  const isExec = target === 'matt_huang';
 
-    const MATT_PROMPT = `Search Twitter/X and the web for recent mentions of Matt Huang (co-founder and managing partner of Paradigm crypto VC) from the last 30 days.
-
-Analyze the sentiment and return a JSON object with this exact structure:
-{
-  "target": "Matt Huang",
-  "period": "Last 30 days",
-  "total_mentions": <number>,
-  "unique_accounts": <number>,
-  "sentiment_breakdown": {
-    "positive": <percentage 0-100>,
-    "neutral": <percentage 0-100>,
-    "negative": <percentage 0-100>
-  },
-  "severity_counts": {
-    "high": <number of high-severity negative mentions>,
-    "medium": <number>,
-    "low": <number>,
-    "alerts": <number of urgent/threatening mentions>
-  },
-  "top_themes": [
-    {"theme": "<theme name>", "sentiment": "positive|neutral|negative", "count": <number>},
-    ...up to 6 themes
-  ],
-  "recent_highlights": [
-    {"text": "<short quote or summary>", "sentiment": "positive|neutral|negative", "source": "Twitter|Reddit|News", "date": "<date>"},
-    ...up to 5 highlights
-  ],
-  "trend_summary": "<2-3 sentence summary of how sentiment has trended this month>"
-}
-
-Return ONLY the JSON object, no other text.`;
-
-    // Run both agents in parallel
-    const [paradigmText, mattText] = await Promise.all([
-      runAgent(PARADIGM_PROMPT),
-      runAgent(MATT_PROMPT),
-    ]);
-
-    const paradigmData = parseJsonFromText(paradigmText) || getFallback('Paradigm (@paradigm)');
-    const mattData = parseJsonFromText(mattText) || getFallback('Matt Huang');
-
-    return NextResponse.json({
-      ok: true,
-      last_updated: new Date().toISOString(),
-      data: [paradigmData, mattData],
-    });
+  try {
+    const text = await runAgent(buildPrompt(target, isExec));
+    const data = parseJson(text);
+    if (!data) throw new Error('Could not parse agent response');
+    return NextResponse.json({ ok: true, last_updated: new Date().toISOString(), ...data });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     return NextResponse.json({ ok: false, error: message }, { status: 500 });
   }
-}
-
-function getFallback(target: string) {
-  return {
-    target,
-    period: 'Last 30 days',
-    total_mentions: 0,
-    unique_accounts: 0,
-    sentiment_breakdown: { positive: 0, neutral: 0, negative: 0 },
-    severity_counts: { high: 0, medium: 0, low: 0, alerts: 0 },
-    top_themes: [],
-    recent_highlights: [],
-    trend_summary: 'Data unavailable.',
-  };
 }
