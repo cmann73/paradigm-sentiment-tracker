@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Paradigm Sentiment Tracker</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #root { height: 100%; }
+    body {
+      font-family: 'Inter', -apple-system, 'Segoe UI', sans-serif;
+      background: #1C2127;
+      color: #F6F7F9;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #1C2127; }
+    ::-webkit-scrollbar-thumb { background: #394B59; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #4C90F0; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.2} }
+    .pulse { animation: pulse 2s infinite; }
+    select option { background: #252A31; }
+    input::placeholder { color: #5C7080; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useMemo } = React;
+
+// ── Palantir Blueprint color tokens ──────────────────────────────────────────
+const C = {
+  dark1: '#1C2127', dark2: '#252A31', dark3: '#2F3640', dark4: '#383E47', dark5: '#404854',
+  border: '#394B59', borderLight: '#30404D',
+  blue1: '#184A90', blue2: '#215DB0', blue3: '#2D72D2', blue4: '#4C90F0', blue5: '#8ABBFF',
+  green1: '#1D7324', green2: '#238C2C', green3: '#32A467', green4: '#3DCC91', green5: '#72CA9B',
+  red1: '#8E292C', red2: '#AC2F33', red3: '#C9302C', red4: '#FA4B4B', red5: '#FF9980',
+  orange1: '#77450D', orange2: '#935610', orange3: '#C87619', orange4: '#F29D49', orange5: '#FFB366',
+  gold1: '#5C4405', gold2: '#866103', gold3: '#D4AC0D', gold4: '#FFC940', gold5: '#FFD966',
+  text: '#F6F7F9', textMuted: '#8F99A8', textDisabled: '#5C7080',
+  white: '#FFFFFF',
+};
+
+// ── Threat Keyword Library ───────────────────────────────────────────────────
+// Sources: DHS Media Monitoring List (EPIC FOIA) · The Grievance Dictionary, van der Vegt et al. (2021)
+const THREAT_KEYWORDS = {
+  critical: { label:'Critical', color:C.red4, bg:'rgba(250,75,75,0.15)', words:['assassination','assassinate','hostage','shooting','shots fired','standoff','lockdown','bomb','explosion','explosive','pipe bomb','riot','kill','murder','execute','eliminate','shoot','stab','strangle','poison','plot','ambush','abduct','kidnap','ransom','attack'] },
+  high:     { label:'High',     color:C.orange4, bg:'rgba(242,157,73,0.15)', words:['target','targeting','hunt','track','locate','stalk','confront','surveillance','weapon','gun','firearm','rifle','pistol','knife','blade','nothing to lose','last resort','make them pay','will pay','deserve to die','should die','threat','breach','extremism','militia','trafficking','intimidate','extort','blackmail'] },
+  medium:   { label:'Medium',   color:C.gold4, bg:'rgba(255,201,64,0.12)', words:['fraud','manipulation','scam','investigation','lawsuit','SEC','DOJ','regulatory','scrutiny','probe','allegation','corrupt','criminal','prosecute','subpoena','indictment','expose','doxx','leak','front-running','insider trading','money laundering','exit liquidity','rug pull','ponzi'] },
+  low:      { label:'Low',      color:C.blue4, bg:'rgba(76,144,240,0.12)', words:['suspicious','questionable','misleading','deceptive','dishonest','problematic','unethical','shady','sketchy','grifter','parasite','leech','rigged','accountability','backlash','boycott'] },
+};
+const ALL_KW_FLAT = Object.entries(THREAT_KEYWORDS).reduce((acc,[level,{words}]) => { words.forEach(w => { acc[w.toLowerCase()]=level; }); return acc; }, {});
+
+// ── Data ─────────────────────────────────────────────────────────────────────
+function makeData(target) {
+  const isExec = target === 'matt_huang';
+  const base = isExec ? 120 : 247;
+  const rng = (n) => ((Math.sin(n*(isExec?42:7))+1)/2);
+
+  const daily_data = Array.from({length:30},(_,i) => {
+    const count = Math.floor(rng(i*3+1)*18)+(isExec?3:6);
+    return {
+      date: new Date(Date.now()-(29-i)*86400000).toISOString().split('T')[0],
+      count, unique_accounts:Math.floor(count*(0.6+rng(i)*0.3)),
+      high_severity_count:Math.floor(count*(0.05+rng(i*2)*0.1)),
+      alerts_count:Math.floor(Math.floor(count*(0.05+rng(i*2)*0.1))*(0.2+rng(i*5)*0.4)),
+      avg_sentiment:(rng(i*7)-0.5)*(isExec?0.6:0.8),
+    };
+  });
+
+  const sources = isExec
+    ? [{source:'twitter',count:54,avg_sentiment:0.12},{source:'reddit',count:38,avg_sentiment:-0.05},{source:'news_coindesk',count:18,avg_sentiment:0.22},{source:'news_theblock',count:10,avg_sentiment:0.08}]
+    : [{source:'reddit',count:134,avg_sentiment:-0.08},{source:'news_coindesk',count:45,avg_sentiment:0.15},{source:'news_theblock',count:32,avg_sentiment:0.05},{source:'twitter',count:36,avg_sentiment:-0.22}];
+
+  const high_severity_mentions = isExec ? [
+    {id:1,source:'twitter',title:null,content:'Matt Huang was spotted at another exclusive conference. Some people are questioning whether crypto VCs are too insular and disconnected from retail investors.',url:'#',published_at:new Date(Date.now()-3600000).toISOString(),severity_score:7.2,sentiment_score:-0.55,threat_level:'high',threat_keywords:['insular','disconnected'],employee_mentions:['Matt Huang']},
+    {id:2,source:'reddit',title:'Discussion: Paradigm leadership',content:"Matt Huang's recent comments on regulation are drawing fire from some in the community who think he's being too cozy with legislators.",url:'#',published_at:new Date(Date.now()-10800000).toISOString(),severity_score:5.8,sentiment_score:-0.38,threat_level:'medium',threat_keywords:['cozy'],employee_mentions:['Matt Huang']},
+  ] : [
+    {id:1,source:'reddit',title:'Concerns about Paradigm investments',content:'There have been multiple reports of questionable trading activity connected to Paradigm portfolio companies. This seems like potential market manipulation...',url:'#',published_at:new Date(Date.now()-3600000).toISOString(),severity_score:8.5,sentiment_score:-0.7,threat_level:'critical',threat_keywords:['manipulation','questionable'],employee_mentions:[]},
+    {id:2,source:'twitter',title:null,content:"Just saw Matt Huang at a conference. Someone should investigate their front-running activities. This is fraud!",url:'#',published_at:new Date(Date.now()-7200000).toISOString(),severity_score:7.8,sentiment_score:-0.65,threat_level:'high',threat_keywords:['fraud','front-running','investigate'],employee_mentions:['Matt Huang']},
+    {id:3,source:'news_coindesk',title:'Regulatory scrutiny increases for crypto VCs',content:'Several major crypto venture capital firms including Paradigm are facing increased regulatory attention following recent market events...',url:'#',published_at:new Date(Date.now()-14400000).toISOString(),severity_score:6.2,sentiment_score:-0.35,threat_level:'medium',threat_keywords:['scrutiny'],employee_mentions:[]},
+  ];
+
+  const alerts = isExec ? [
+    {id:1,mention_id:1,alert_level:'high',alert_reason:'Executive mentioned with negative sentiment in high-engagement Twitter thread',is_reviewed:false,created_at:new Date(Date.now()-3600000).toISOString()},
+    {id:2,mention_id:2,alert_level:'medium',alert_reason:'Regulatory criticism referencing leadership by name',is_reviewed:true,created_at:new Date(Date.now()-10800000).toISOString()},
+  ] : [
+    {id:1,mention_id:1,alert_level:'critical',alert_reason:'High severity score with manipulation keywords detected in Reddit thread',is_reviewed:false,created_at:new Date(Date.now()-3600000).toISOString()},
+    {id:2,mention_id:2,alert_level:'high',alert_reason:'Employee mentioned alongside fraud allegations on Twitter',is_reviewed:false,created_at:new Date(Date.now()-7200000).toISOString()},
+    {id:3,mention_id:3,alert_level:'medium',alert_reason:'Regulatory concern surfaced in CoinDesk news coverage',is_reviewed:true,created_at:new Date(Date.now()-14400000).toISOString()},
+  ];
+
+  const srcLabels = ['reddit','twitter','news_coindesk','news_theblock'];
+  const recent_mentions = Array.from({length:30},(_,i) => ({
+    id:i+10, source:srcLabels[Math.floor(rng(i*11)*4)],
+    title:`${isExec?'Matt Huang':'Paradigm'} mention #${i+1}`,
+    content:`Sample mention content about ${isExec?"Matt Huang's views and investments":"Paradigm's portfolio activity and market positioning"}. Mention ${i+1} of 30 in the current window.`,
+    url:'#', published_at:new Date(Date.now()-Math.floor(rng(i*13)*86400000*7)).toISOString(),
+    severity_score:rng(i*17)*8, sentiment_score:(rng(i*19)-0.5)*2,
+    threat_level:['none','low','medium','high'][Math.floor(rng(i*23)*4)],
+    threat_keywords:[], employee_mentions:[],
+  }));
+
+  const threat_keywords = isExec
+    ? [{keyword:'insular',count:6},{keyword:'cozy',count:4},{keyword:'disconnected',count:3},{keyword:'elitist',count:2},{keyword:'regulatory',count:2}]
+    : [{keyword:'manipulation',count:12},{keyword:'fraud',count:8},{keyword:'scam',count:6},{keyword:'investigation',count:5},{keyword:'suspicious',count:4}];
+
+  const employee_mentions = [
+    {name:'Matt Huang',count:isExec?89:8,sentiment:isExec?0.08:-0.15},
+    {name:'Fred Ehrsam',count:isExec?12:5,sentiment:0.12},
+    {name:'Dan Robinson',count:isExec?8:3,sentiment:0.25},
+    {name:'Georgios K.',count:isExec?5:2,sentiment:0.08},
+  ];
+
+  return {
+    generated_at:new Date().toISOString(), target,
+    stats:{total_mentions:base,unique_accounts:Math.floor(base*0.74),avg_sentiment:isExec?0.08:-0.12,
+      threat_counts:isExec?{critical:1,high:4,medium:18,low:32}:{critical:3,high:12,medium:45,low:87},
+      daily_data,source_breakdown:sources},
+    high_severity_mentions,alerts,recent_mentions,threat_keywords,employee_mentions,
+  };
+}
+
+// ── Blueprint-style components ───────────────────────────────────────────────
+
+const Tag = ({intent='none',children,minimal=false}) => {
+  const intents = {
+    none:    {bg:minimal?'transparent':C.dark4, color:C.textMuted, border:C.border},
+    primary: {bg:minimal?'transparent':C.blue2,  color:C.blue5,    border:C.blue3},
+    success: {bg:minimal?'transparent':C.green1,  color:C.green5,   border:C.green3},
+    warning: {bg:minimal?'transparent':C.orange1, color:C.orange5,  border:C.orange3},
+    danger:  {bg:minimal?'transparent':C.red1,    color:C.red5,     border:C.red3},
+    gold:    {bg:minimal?'transparent':C.gold1,   color:C.gold5,    border:C.gold3},
+  };
+  const s = intents[intent]||intents.none;
+  return (
+    <span style={{display:'inline-flex',alignItems:'center',padding:'2px 6px',borderRadius:2,fontSize:11,fontWeight:500,background:s.bg,color:s.color,border:`1px solid ${s.border}`,whiteSpace:'nowrap',letterSpacing:'0.02em'}}>
+      {children}
+    </span>
+  );
+};
+
+const intentFor = (level) => ({critical:'danger',high:'warning',medium:'gold',low:'primary',none:'none'}[level]||'none');
+const colorFor  = (level) => ({critical:C.red4,high:C.orange4,medium:C.gold4,low:C.blue4}[level]||C.textDisabled);
+
+const Callout = ({intent='none',title,children}) => {
+  const c = colorFor(intent==='danger'?'critical':intent==='warning'?'high':intent==='gold'?'medium':intent==='primary'?'low':'none');
+  return (
+    <div style={{borderLeft:`3px solid ${c}`,background:C.dark3,padding:'10px 14px',marginBottom:8}}>
+      {title && <div style={{fontWeight:600,fontSize:12,color:C.text,marginBottom:4}}>{title}</div>}
+      <div style={{color:C.textMuted,fontSize:12}}>{children}</div>
+    </div>
+  );
+};
+
+const MetricCard = ({label,value,sub,intent='none'}) => {
+  const vc = {none:C.text,primary:C.blue4,success:C.green4,warning:C.orange4,danger:C.red4,gold:C.gold4}[intent]||C.text;
+  return (
+    <div style={{background:C.dark3,border:`1px solid ${C.border}`,padding:'14px 18px'}}>
+      <div style={{fontSize:11,color:C.textMuted,textTransform:'uppercase',letterSpacing:'0.08em',marginBottom:6}}>{label}</div>
+      <div style={{fontSize:26,fontWeight:600,color:vc,lineHeight:1,marginBottom:sub?4:0}}>{value}</div>
+      {sub && <div style={{fontSize:11,color:C.textDisabled}}>{sub}</div>}
+    </div>
+  );
+};
+
+// Divider
+const Divider = ({vertical=false}) => (
+  <div style={vertical
+    ? {width:1,height:'100%',background:C.border,margin:'0 8px'}
+    : {height:1,background:C.border,margin:'8px 0'}
+  } />
+);
+
+// Table
+const Table = ({cols,rows,onRowClick}) => (
+  <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+    <thead>
+      <tr style={{background:C.dark4,borderBottom:`1px solid ${C.border}`}}>
+        {cols.map((c,i) => (
+          <th key={i} style={{padding:'8px 12px',textAlign:'left',fontWeight:500,color:C.textMuted,fontSize:11,textTransform:'uppercase',letterSpacing:'0.07em',whiteSpace:'nowrap'}}>{c.label}</th>
+        ))}
+      </tr>
+    </thead>
+    <tbody>
+      {rows.map((row,ri) => (
+        <tr key={ri} onClick={() => onRowClick && onRowClick(row)}
+          style={{borderBottom:`1px solid ${C.borderLight}`,cursor:onRowClick?'pointer':'default',transition:'background 0.1s'}}
+          onMouseEnter={e=>e.currentTarget.style.background=C.dark3}
+          onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
+          {cols.map((c,ci) => (
+            <td key={ci} style={{padding:'8px 12px',color:C.text,verticalAlign:'middle'}}>{c.render?c.render(row):row[c.key]}</td>
+          ))}
+        </tr>
+      ))}
+    </tbody>
+  </table>
+);
+
+// Nav item
+const NavItem = ({icon,label,active,onClick,badge}) => (
+  <div onClick={onClick} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 16px',cursor:'pointer',background:active?C.blue1:'transparent',borderLeft:`2px solid ${active?C.blue3:'transparent'}`,color:active?C.blue5:C.textMuted,transition:'all 0.1s',userSelect:'none'}}
+    onMouseEnter={e=>{if(!active)e.currentTarget.style.background=C.dark3}}
+    onMouseLeave={e=>{if(!active)e.currentTarget.style.background='transparent'}}>
+    <span style={{fontSize:16,lineHeight:1,flexShrink:0}}>{icon}</span>
+    <span style={{fontSize:13,fontWeight:active?500:400,flex:1}}>{label}</span>
+    {badge>0 && <span style={{background:C.red3,color:C.white,fontSize:10,fontWeight:600,borderRadius:10,padding:'1px 6px',minWidth:18,textAlign:'center'}}>{badge}</span>}
+  </div>
+);
+
+// Blueprint-style button
+const Btn = ({onClick,children,intent='none',minimal=false,disabled=false}) => {
+  const base = {
+    none:    {bg:C.dark4,border:C.border,color:C.text,hover:C.dark5},
+    primary: {bg:C.blue3,border:C.blue2,color:C.white,hover:C.blue2},
+    danger:  {bg:C.red3, border:C.red2, color:C.white,hover:C.red2},
+  }[intent]||{bg:C.dark4,border:C.border,color:C.text};
+  const [hov,setHov] = useState(false);
+  return (
+    <button onClick={disabled?undefined:onClick} disabled={disabled}
+      onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
+      style={{padding:'5px 12px',background:disabled?C.dark3:hov?(base.hover||base.bg):base.bg,border:`1px solid ${base.border}`,borderRadius:2,color:disabled?C.textDisabled:base.color,fontSize:12,fontWeight:500,cursor:disabled?'not-allowed':'pointer',transition:'all 0.1s',whiteSpace:'nowrap'}}>
+      {children}
+    </button>
+  );
+};
+
+// Chart canvas components
+const LineChartCanvas = ({data,datasets,height=200}) => {
+  const ref = useRef(null); const ch = useRef(null);
+  useEffect(()=>{
+    if(!ref.current)return; if(ch.current)ch.current.destroy();
+    ch.current=new Chart(ref.current,{
+      type:'line', data:{labels:data.map(d=>d.date.slice(5)),datasets},
+      options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+        plugins:{legend:{position:'top',align:'end',labels:{color:C.textMuted,font:{family:'Inter',size:10},boxWidth:10,padding:14}},tooltip:{backgroundColor:C.dark3,titleColor:C.text,bodyColor:C.textMuted,borderColor:C.border,borderWidth:1}},
+        scales:{x:{grid:{color:C.borderLight},ticks:{color:C.textMuted,font:{family:'Inter',size:10}}},y:{grid:{color:C.borderLight},ticks:{color:C.textMuted,font:{family:'Inter',size:10}}}}}
+    });
+    return()=>{if(ch.current)ch.current.destroy();};
+  },[data]);
+  return <canvas ref={ref}/>;
+};
+
+const DonutCanvas = ({data:d,labels,colors,height=180}) => {
+  const ref=useRef(null); const ch=useRef(null);
+  useEffect(()=>{
+    if(!ref.current)return; if(ch.current)ch.current.destroy();
+    ch.current=new Chart(ref.current,{
+      type:'doughnut',
+      data:{labels,datasets:[{data:d,backgroundColor:colors,borderColor:C.dark2,borderWidth:2}]},
+      options:{responsive:true,maintainAspectRatio:false,cutout:'68%',
+        plugins:{legend:{position:'right',labels:{color:C.textMuted,font:{family:'Inter',size:11},padding:12,boxWidth:10}},tooltip:{backgroundColor:C.dark3,titleColor:C.text,bodyColor:C.textMuted,borderColor:C.border,borderWidth:1}}}
+    });
+    return()=>{if(ch.current)ch.current.destroy();};
+  },[d]);
+  return <canvas ref={ref}/>;
+};
+
+// ── Main App ─────────────────────────────────────────────────────────────────
+const App = () => {
+  const [target,setTarget]=useState('paradigm');
+  const [data,setData]=useState(()=>makeData('paradigm'));
+  const [activeTab,setActiveTab]=useState('overview');
+  const [filter,setFilter]=useState('all');
+  const [search,setSearch]=useState('');
+  const [selectedMention,setSelectedMention]=useState(null);
+
+  const switchTarget=(t)=>{setTarget(t);setData(makeData(t));setActiveTab('overview');setSelectedMention(null);};
+  const refresh=()=>setData(makeData(target));
+
+  const filteredMentions=useMemo(()=>{
+    let items=[...data.recent_mentions,...data.high_severity_mentions];
+    if(filter==='high_severity')items=items.filter(m=>m.severity_score>=6);
+    else if(filter!=='all')items=items.filter(m=>m.source.includes(filter));
+    if(search){const t=search.toLowerCase();items=items.filter(m=>m.title?.toLowerCase().includes(t)||m.content?.toLowerCase().includes(t));}
+    return items.sort((a,b)=>new Date(b.published_at)-new Date(a.published_at)).slice(0,50);
+  },[data,filter,search]);
+
+  const unreviewed=data.alerts.filter(a=>!a.is_reviewed);
+  const totalHighSev=data.stats.daily_data.reduce((s,d)=>s+(d.high_severity_count||0),0);
+  const totalAlerts=data.stats.daily_data.reduce((s,d)=>s+(d.alerts_count||0),0);
+  const recentHS=data.stats.daily_data.slice(-7).reduce((s,d)=>s+(d.high_severity_count||0),0);
+  const prevHS=data.stats.daily_data.slice(-14,-7).reduce((s,d)=>s+(d.high_severity_count||0),0);
+  const recentA=data.stats.daily_data.slice(-7).reduce((s,d)=>s+(d.alerts_count||0),0);
+  const prevA=data.stats.daily_data.slice(-14,-7).reduce((s,d)=>s+(d.alerts_count||0),0);
+  const hsChg=prevHS>0?Math.round((recentHS-prevHS)/prevHS*100):0;
+  const aChg=prevA>0?Math.round((recentA-prevA)/prevA*100):0;
+
+  const sentDatasets=[
+    {label:'Sentiment',data:data.stats.daily_data.map(d=>d.avg_sentiment),borderColor:C.blue4,backgroundColor:'rgba(76,144,240,0.06)',fill:true,tension:0.4,borderWidth:1.5,pointRadius:0,yAxisID:'y'},
+    {label:'Mentions',data:data.stats.daily_data.map(d=>d.count),borderColor:C.textDisabled,borderDash:[4,4],tension:0.4,borderWidth:1,pointRadius:0,yAxisID:'y1'},
+    {label:'Unique Accts',data:data.stats.daily_data.map(d=>d.unique_accounts),borderColor:C.green4,tension:0.4,borderWidth:1.5,pointRadius:0,yAxisID:'y1'},
+  ];
+  const alertDatasets=[
+    {label:'High Severity',data:data.stats.daily_data.map(d=>d.high_severity_count||0),borderColor:C.orange4,backgroundColor:'rgba(242,157,73,0.08)',fill:true,tension:0.4,borderWidth:2,pointRadius:2,pointBackgroundColor:C.orange4},
+    {label:'Alerts',data:data.stats.daily_data.map(d=>d.alerts_count||0),borderColor:C.red4,backgroundColor:'rgba(250,75,75,0.08)',fill:true,tension:0.4,borderWidth:2,pointRadius:2,pointBackgroundColor:C.red4},
+  ];
+
+  const mentionCols=[
+    {label:'Source',key:'source',render:r=><Tag intent={r.source==='reddit'?'warning':r.source==='twitter'?'none':'success'} minimal>{r.source.replace('news_','')}</Tag>},
+    {label:'Content',key:'content',render:r=><div style={{maxWidth:320,overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis',color:C.textMuted}}>{r.title||r.content}</div>},
+    {label:'Threat',key:'threat_level',render:r=><Tag intent={intentFor(r.threat_level)}>{r.threat_level||'none'}</Tag>},
+    {label:'Severity',key:'severity_score',render:r=>{const c=r.severity_score>=6?C.red4:r.severity_score>=4?C.orange4:C.green4;return<span style={{color:c,fontWeight:600}}>{r.severity_score?.toFixed(1)}</span>;}},
+    {label:'Sentiment',key:'sentiment_score',render:r=><span style={{color:r.sentiment_score<-0.2?C.red4:r.sentiment_score>0.2?C.green4:C.textMuted}}>{r.sentiment_score?.toFixed(2)}</span>},
+    {label:'Date',key:'published_at',render:r=><span style={{color:C.textDisabled,fontSize:11}}>{new Date(r.published_at).toLocaleDateString()}</span>},
+  ];
+
+  return (
+    <div style={{display:'flex',flexDirection:'column',height:'100vh',background:C.dark1}}>
+
+      {/* Top bar */}
+      <div style={{height:48,background:C.dark2,borderBottom:`1px solid ${C.border}`,display:'flex',alignItems:'center',padding:'0 16px',gap:16,flexShrink:0,zIndex:10}}>
+        {/* Logo area */}
+        <div style={{display:'flex',alignItems:'center',gap:10,paddingRight:16,borderRight:`1px solid ${C.border}`}}>
+          <div style={{width:20,height:20,background:C.blue3,display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,fontWeight:700,color:C.white,flexShrink:0}}>P</div>
+          <span style={{fontSize:13,fontWeight:600,color:C.text,letterSpacing:'0.01em'}}>Paradigm</span>
+          <span style={{color:C.textDisabled,fontSize:13}}>›</span>
+          <span style={{fontSize:13,color:C.textMuted}}>Signal</span>
+        </div>
+
+        {/* Target picker */}
+        <div style={{display:'flex',gap:1,background:C.dark4,border:`1px solid ${C.border}`,borderRadius:2,overflow:'hidden'}}>
+          {[['paradigm','@Paradigm'],['matt_huang','Matt Huang']].map(([val,lbl])=>(
+            <button key={val} onClick={()=>switchTarget(val)} style={{padding:'4px 12px',background:target===val?C.blue3:'transparent',color:target===val?C.white:C.textMuted,border:'none',cursor:'pointer',fontSize:12,fontWeight:500,transition:'all 0.1s'}}>{lbl}</button>
+          ))}
+        </div>
+
+        <div style={{flex:1}}/>
+
+        {/* Alert badge */}
+        {unreviewed.length>0&&(
+          <div style={{display:'flex',alignItems:'center',gap:6,padding:'4px 10px',background:'rgba(250,75,75,0.12)',border:`1px solid ${C.red3}`,borderRadius:2}}>
+            <span className="pulse" style={{width:6,height:6,borderRadius:'50%',background:C.red4,display:'inline-block',flexShrink:0}}/>
+            <span style={{fontSize:11,fontWeight:600,color:C.red5}}>{unreviewed.length} UNREVIEWED ALERT{unreviewed.length>1?'S':''}</span>
+          </div>
+        )}
+
+        <span style={{fontSize:11,color:C.textDisabled}}>Updated {new Date(data.generated_at).toLocaleTimeString()}</span>
+        <Btn onClick={refresh} intent="none">↻ Refresh</Btn>
+      </div>
+
+      {/* Body: sidebar + content */}
+      <div style={{display:'flex',flex:1,overflow:'hidden'}}>
+
+        {/* Left sidebar */}
+        <div style={{width:200,background:C.dark2,borderRight:`1px solid ${C.border}`,display:'flex',flexDirection:'column',flexShrink:0,overflowY:'auto'}}>
+          <div style={{padding:'12px 0',flex:1}}>
+            <div style={{padding:'6px 16px 4px',fontSize:10,color:C.textDisabled,textTransform:'uppercase',letterSpacing:'0.1em',fontWeight:600}}>Intelligence</div>
+            <NavItem icon="⬛" label="Overview" active={activeTab==='overview'} onClick={()=>setActiveTab('overview')}/>
+            <NavItem icon="⚠" label="Alerts" active={activeTab==='alerts'} onClick={()=>setActiveTab('alerts')} badge={unreviewed.length}/>
+            <NavItem icon="◉" label="Mentions" active={activeTab==='mentions'} onClick={()=>setActiveTab('mentions')}/>
+            <Divider/>
+            <div style={{padding:'6px 16px 4px',fontSize:10,color:C.textDisabled,textTransform:'uppercase',letterSpacing:'0.1em',fontWeight:600}}>Analysis</div>
+            <NavItem icon="↗" label="Trends" active={activeTab==='trends'} onClick={()=>setActiveTab('trends')}/>
+            <NavItem icon="⚑" label="Keywords" active={activeTab==='keywords'} onClick={()=>setActiveTab('keywords')}/>
+          </div>
+
+          {/* Sidebar footer stats */}
+          <div style={{borderTop:`1px solid ${C.border}`,padding:12}}>
+            <div style={{fontSize:10,color:C.textDisabled,marginBottom:8,textTransform:'uppercase',letterSpacing:'0.07em'}}>30-Day Summary</div>
+            {[
+              {label:'Mentions',val:data.stats.total_mentions,c:C.text},
+              {label:'Critical',val:data.stats.threat_counts.critical,c:C.red4},
+              {label:'High',val:data.stats.threat_counts.high,c:C.orange4},
+              {label:'Avg Sentiment',val:data.stats.avg_sentiment.toFixed(2),c:data.stats.avg_sentiment>0?C.green4:C.red4},
+            ].map((s,i)=>(
+              <div key={i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'3px 0'}}>
+                <span style={{fontSize:11,color:C.textMuted}}>{s.label}</span>
+                <span style={{fontSize:12,fontWeight:600,color:s.c}}>{s.val}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Main content */}
+        <div style={{flex:1,overflowY:'auto',display:'flex',flexDirection:'column'}}>
+
+          {/* Page header */}
+          <div style={{padding:'14px 20px',borderBottom:`1px solid ${C.border}`,background:C.dark2,display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
+            <div>
+              <div style={{fontSize:15,fontWeight:600,color:C.text}}>
+                {activeTab==='overview'?'Dashboard Overview':activeTab==='alerts'?'Alert Feed':activeTab==='mentions'?'Mention Explorer':activeTab==='trends'?'Trend Analysis':'Keyword Library'}
+              </div>
+              <div style={{fontSize:11,color:C.textDisabled,marginTop:2}}>
+                Target: <span style={{color:C.blue5}}>{target==='paradigm'?'@Paradigm':'Matt Huang'}</span> · Last 30 days · Demo data
+              </div>
+            </div>
+          </div>
+
+          {/* OVERVIEW */}
+          {activeTab==='overview'&&(
+            <div style={{padding:20,display:'flex',flexDirection:'column',gap:16}}>
+
+              {/* Metric row */}
+              <div style={{display:'grid',gridTemplateColumns:'repeat(6,1fr)',gap:1,background:C.border}}>
+                <MetricCard label="Total Mentions" value={data.stats.total_mentions}/>
+                <MetricCard label="Unique Accounts" value={data.stats.unique_accounts} sub={`${Math.round(data.stats.unique_accounts/data.stats.total_mentions*100)}% of mentions`}/>
+                <MetricCard label="Avg Sentiment" value={data.stats.avg_sentiment.toFixed(2)} intent={data.stats.avg_sentiment>0?'success':'danger'}/>
+                <MetricCard label="Critical" value={data.stats.threat_counts.critical} intent="danger"/>
+                <MetricCard label="High" value={data.stats.threat_counts.high} intent="warning"/>
+                <MetricCard label="Medium" value={data.stats.threat_counts.medium} intent="gold"/>
+              </div>
+
+              {/* Charts */}
+              <div style={{display:'grid',gridTemplateColumns:'2fr 1fr',gap:16}}>
+                <div style={{background:C.dark2,border:`1px solid ${C.border}`,padding:16}}>
+                  <div style={{fontSize:11,fontWeight:600,color:C.textMuted,textTransform:'uppercase',letterSpacing:'0.08em',marginBottom:12}}>30-Day Trend — Sentiment · Mentions · Unique Accounts</div>
+                  <div style={{height:220}}>
+                    <LineChartCanvas data={data.stats.daily_data} datasets={sentDatasets}/>
+                  </div>
+                </div>
+                <div style={{background:C.dark2,border:`1px solid ${C.border}`,padding:16}}>
+                  <div style={{fontSize:11,fontWeight:600,color:C.textMuted,textTransform:'uppercase',letterSpacing:'0.08em',marginBottom:12}}>Source Distribution</div>
+                  <div style={{height:220}}>
+                    <DonutCanvas data={data.stats.source_breakdown.map(s=>s.count)} labels={data.stats.source_breakdown.map(s=>s.source.replace('news_','').toUpperCase())} colors={['#FF4500',C.blue4,C.green4,C.textDisabled]}/>
+                  </div>
+                </div>
+              </div>
+
+              {/* Alert trend */}
+              <div style={{background:C.dark2,border:`1px solid ${C.border}`,padding:16}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+                  <div style={{fontSize:11,fontWeight:600,color:C.textMuted,textTransform:'uppercase',letterSpacing:'0.08em'}}>30-Day Alerts & High Severity Trend</div>
+                  <div style={{display:'flex',gap:16,fontSize:11,color:C.textDisabled}}>
+                    <span>Total High Sev: <strong style={{color:C.orange4}}>{totalHighSev}</strong></span>
+                    <span>Total Alerts: <strong style={{color:C.red4}}>{totalAlerts}</strong></span>
+                    <span>Avg/Day: <strong style={{color:C.text}}>{(totalAlerts/30).toFixed(1)}</strong></span>
+                  </div>
+                </div>
+                <div style={{height:160}}>
+                  <LineChartCanvas data={data.stats.daily_data} datasets={alertDatasets}/>
+                </div>
+              </div>
+
+              {/* Two column: high severity mentions + alerts */}
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
+                <div style={{background:C.dark2,border:`1px solid ${C.border}`}}>
+                  <div style={{padding:'10px 14px',borderBottom:`1px solid ${C.border}`,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                    <span style={{fontSize:11,fontWeight:600,color:C.textMuted,textTransform:'uppercase',letterSpacing:'0.08em'}}>High Severity Mentions</span>
+                    <Tag intent="danger" minimal>{data.high_severity_mentions.length}</Tag>
+                  </div>
+                  <div style={{padding:14,display:'flex',flexDirection:'column',gap:8,maxHeight:320,overflowY:'auto'}}>
+                    {data.high_severity_mentions.map(m=>(
+                      <Callout key={m.id} intent={intentFor(m.threat_level)} title={m.title||m.source.toUpperCase()+' · '+new Date(m.published_at).toLocaleDateString()}>
+                        <div style={{fontSize:12,marginBottom:6}}>{m.content.slice(0,160)}…</div>
+                        <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+                          <Tag intent={intentFor(m.threat_level)}>{m.threat_level}</Tag>
+                          <Tag intent="none" minimal>Severity {m.severity_score.toFixed(1)}</Tag>
+                          {m.employee_mentions.map(e=><Tag key={e} intent="primary" minimal>@ {e}</Tag>)}
+                        </div>
+                      </Callout>
+                    ))}
+                  </div>
+                </div>
+                <div style={{background:C.dark2,border:`1px solid ${C.border}`}}>
+                  <div style={{padding:'10px 14px',borderBottom:`1px solid ${C.border}`,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                    <span style={{fontSize:11,fontWeight:600,color:C.textMuted,textTransform:'uppercase',letterSpacing:'0.08em'}}>Recent Alerts</span>
+                    {unreviewed.length>0&&<Tag intent="danger">{unreviewed.length} New</Tag>}
+                  </div>
+                  <div style={{maxHeight:320,overflowY:'auto'}}>
+                    {data.alerts.map(a=>(
+                      <div key={a.id} style={{padding:'10px 14px',borderBottom:`1px solid ${C.borderLight}`,display:'flex',gap:12,alignItems:'flex-start'}}>
+                        <div style={{width:2,alignSelf:'stretch',background:colorFor(a.alert_level==='critical'?'critical':a.alert_level==='high'?'high':a.alert_level==='medium'?'medium':'low'),flexShrink:0,borderRadius:1}}/>
+                        <div style={{flex:1}}>
+                          <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:4}}>
+                            <Tag intent={intentFor(a.alert_level)}>{a.alert_level}</Tag>
+                            {!a.is_reviewed&&<span className="pulse" style={{width:5,height:5,borderRadius:'50%',background:C.green4,display:'inline-block'}}/>}
+                            <span style={{fontSize:10,color:C.textDisabled}}>{new Date(a.created_at).toLocaleString()}</span>
+                          </div>
+                          <p style={{fontSize:12,color:C.textMuted,lineHeight:1.4}}>{a.alert_reason}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ALERTS */}
+          {activeTab==='alerts'&&(
+            <div style={{padding:20}}>
+              <div style={{background:C.dark2,border:`1px solid ${C.border}`}}>
+                <div style={{padding:'10px 14px',borderBottom:`1px solid ${C.border}`}}>
+                  <span style={{fontSize:11,fontWeight:600,color:C.textMuted,textTransform:'uppercase',letterSpacing:'0.08em'}}>All Alerts · {data.alerts.length} total · {unreviewed.length} unreviewed</span>
+                </div>
+                {data.alerts.map(a=>(
+                  <div key={a.id} style={{padding:'12px 16px',borderBottom:`1px solid ${C.borderLight}`,display:'flex',gap:14,alignItems:'flex-start'}}>
+                    <div style={{width:3,alignSelf:'stretch',background:colorFor(a.alert_level==='critical'?'critical':a.alert_level==='high'?'high':a.alert_level==='medium'?'medium':'low'),flexShrink:0}}/>
+                    <div style={{flex:1}}>
+                      <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:6}}>
+                        <Tag intent={intentFor(a.alert_level)}>{a.alert_level.toUpperCase()}</Tag>
+                        {!a.is_reviewed&&<><span className="pulse" style={{width:6,height:6,borderRadius:'50%',background:C.green4,display:'inline-block'}}/><span style={{fontSize:10,color:C.green5,fontWeight:500}}>UNREVIEWED</span></>}
+                        <span style={{fontSize:11,color:C.textDisabled,marginLeft:'auto'}}>{new Date(a.created_at).toLocaleString()}</span>
+                      </div>
+                      <p style={{fontSize:13,color:C.text}}>{a.alert_reason}</p>
+                    </div>
+                    <Btn intent="none">Review</Btn>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* MENTIONS */}
+          {activeTab==='mentions'&&(
+            <div style={{padding:20,display:'flex',flexDirection:'column',gap:12}}>
+              <div style={{display:'flex',gap:10,alignItems:'center'}}>
+                <input type="text" placeholder="Search mentions…" value={search} onChange={e=>setSearch(e.target.value)}
+                  style={{flex:1,background:C.dark3,border:`1px solid ${C.border}`,padding:'6px 12px',fontSize:12,color:C.text,outline:'none',borderRadius:2}}/>
+                <select value={filter} onChange={e=>setFilter(e.target.value)}
+                  style={{background:C.dark3,border:`1px solid ${C.border}`,padding:'6px 10px',fontSize:12,color:C.text,outline:'none',borderRadius:2}}>
+                  <option value="all">All Sources</option>
+                  <option value="high_severity">High Severity</option>
+                  <option value="reddit">Reddit</option>
+                  <option value="twitter">Twitter</option>
+                  <option value="news">News</option>
+                </select>
+                <span style={{fontSize:11,color:C.textDisabled,whiteSpace:'nowrap'}}>{filteredMentions.length} results</span>
+              </div>
+
+              <div style={{display:'flex',gap:12,flex:1,minHeight:0}}>
+                {/* Table */}
+                <div style={{flex:1,background:C.dark2,border:`1px solid ${C.border}`,overflow:'auto'}}>
+                  <Table cols={mentionCols} rows={filteredMentions} onRowClick={setSelectedMention}/>
+                </div>
+
+                {/* Detail panel */}
+                {selectedMention&&(
+                  <div style={{width:320,background:C.dark2,border:`1px solid ${C.border}`,flexShrink:0,display:'flex',flexDirection:'column'}}>
+                    <div style={{padding:'10px 14px',borderBottom:`1px solid ${C.border}`,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                      <span style={{fontSize:11,fontWeight:600,color:C.textMuted,textTransform:'uppercase',letterSpacing:'0.08em'}}>Detail</span>
+                      <button onClick={()=>setSelectedMention(null)} style={{background:'none',border:'none',color:C.textDisabled,cursor:'pointer',fontSize:16,lineHeight:1}}>×</button>
+                    </div>
+                    <div style={{padding:14,display:'flex',flexDirection:'column',gap:12,overflowY:'auto'}}>
+                      <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+                        <Tag intent={intentFor(selectedMention.threat_level)}>{selectedMention.threat_level||'none'}</Tag>
+                        <Tag intent={selectedMention.source==='reddit'?'warning':'none'} minimal>{selectedMention.source.replace('news_','')}</Tag>
+                      </div>
+                      {selectedMention.title&&<div style={{fontWeight:600,fontSize:13,color:C.text}}>{selectedMention.title}</div>}
+                      <div style={{fontSize:12,color:C.textMuted,lineHeight:1.6}}>{selectedMention.content}</div>
+                      <Divider/>
+                      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+                        <div><div style={{fontSize:10,color:C.textDisabled,marginBottom:2}}>SEVERITY</div><div style={{fontSize:16,fontWeight:600,color:selectedMention.severity_score>=6?C.red4:selectedMention.severity_score>=4?C.orange4:C.green4}}>{selectedMention.severity_score?.toFixed(1)}</div></div>
+                        <div><div style={{fontSize:10,color:C.textDisabled,marginBottom:2}}>SENTIMENT</div><div style={{fontSize:16,fontWeight:600,color:selectedMention.sentiment_score<-0.2?C.red4:selectedMention.sentiment_score>0.2?C.green4:C.textMuted}}>{selectedMention.sentiment_score?.toFixed(2)}</div></div>
+                      </div>
+                      <div><div style={{fontSize:10,color:C.textDisabled,marginBottom:4}}>PUBLISHED</div><div style={{fontSize:12,color:C.text}}>{new Date(selectedMention.published_at).toLocaleString()}</div></div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* TRENDS */}
+          {activeTab==='trends'&&(
+            <div style={{padding:20,display:'flex',flexDirection:'column',gap:16}}>
+              <div style={{background:C.dark2,border:`1px solid ${C.border}`,padding:16}}>
+                <div style={{fontSize:11,fontWeight:600,color:C.textMuted,textTransform:'uppercase',letterSpacing:'0.08em',marginBottom:12}}>Sentiment & Volume Over Time</div>
+                <div style={{height:220}}><LineChartCanvas data={data.stats.daily_data} datasets={sentDatasets}/></div>
+              </div>
+              <div style={{background:C.dark2,border:`1px solid ${C.border}`,padding:16}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+                  <div style={{fontSize:11,fontWeight:600,color:C.textMuted,textTransform:'uppercase',letterSpacing:'0.08em'}}>Alerts & High Severity Over Time</div>
+                  <div style={{display:'flex',gap:12}}>
+                    {[{label:'High Sev 7d',val:recentHS,chg:hsChg,c:C.orange4},{label:'Alerts 7d',val:recentA,chg:aChg,c:C.red4}].map((s,i)=>(
+                      <div key={i} style={{textAlign:'right'}}>
+                        <div style={{fontSize:18,fontWeight:600,color:s.c}}>{s.val}</div>
+                        <div style={{fontSize:10,color:s.chg>0?C.red4:s.chg<0?C.green4:C.textDisabled}}>{s.chg>0?'+':''}{s.chg}% vs prev wk · {s.label}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div style={{height:180}}><LineChartCanvas data={data.stats.daily_data} datasets={alertDatasets}/></div>
+              </div>
+
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
+                <div style={{background:C.dark2,border:`1px solid ${C.border}`,padding:16}}>
+                  <div style={{fontSize:11,fontWeight:600,color:C.textMuted,textTransform:'uppercase',letterSpacing:'0.08em',marginBottom:12}}>Top Threat Keywords</div>
+                  {data.threat_keywords.map((kw,i)=>{
+                    const level=ALL_KW_FLAT[kw.keyword.toLowerCase()]||'low';
+                    const c=THREAT_KEYWORDS[level]?.color||C.blue4;
+                    return(
+                      <div key={i} style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}>
+                        <Tag intent={intentFor(level)} minimal>{THREAT_KEYWORDS[level]?.label}</Tag>
+                        <span style={{fontSize:12,color:C.text,flex:1}}>{kw.keyword}</span>
+                        <div style={{width:80,height:3,background:C.dark4,borderRadius:2}}>
+                          <div style={{height:'100%',background:c,width:`${(kw.count/data.threat_keywords[0].count)*100}%`,borderRadius:2}}/>
+                        </div>
+                        <span style={{fontSize:11,color:C.textDisabled,width:20,textAlign:'right'}}>{kw.count}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div style={{background:C.dark2,border:`1px solid ${C.border}`,padding:16}}>
+                  <div style={{fontSize:11,fontWeight:600,color:C.textMuted,textTransform:'uppercase',letterSpacing:'0.08em',marginBottom:12}}>Employee Mentions</div>
+                  <Table cols={[
+                    {label:'Name',key:'name',render:r=><span style={{color:C.text,fontWeight:500}}>{r.name}</span>},
+                    {label:'Mentions',key:'count',render:r=><span style={{fontWeight:600,color:C.blue4}}>{r.count}</span>},
+                    {label:'Avg Sentiment',key:'sentiment',render:r=><span style={{fontWeight:600,color:r.sentiment<0?C.red4:C.green4}}>{r.sentiment>0?'+':''}{r.sentiment.toFixed(2)}</span>},
+                  ]} rows={data.employee_mentions}/>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* KEYWORDS */}
+          {activeTab==='keywords'&&(
+            <div style={{padding:20,display:'flex',flexDirection:'column',gap:16}}>
+              <div style={{background:'rgba(76,144,240,0.08)',border:`1px solid ${C.blue3}`,padding:'10px 14px',borderRadius:2}}>
+                <div style={{fontSize:12,fontWeight:600,color:C.blue5,marginBottom:4}}>Sourced Threat Keyword Library</div>
+                <div style={{fontSize:11,color:C.textMuted}}>Sources: <a href="https://gist.github.com/jm3/2815378" target="_blank" style={{color:C.blue4}}>DHS Media Monitoring List (EPIC FOIA)</a> · <a href="https://github.com/Isabellevdv/grievancedictionary" target="_blank" style={{color:C.blue4}}>The Grievance Dictionary, van der Vegt et al. 2021</a> · Practitioner additions for crypto/VC executive protection</div>
+              </div>
+              {Object.entries(THREAT_KEYWORDS).map(([level,{label,color,description,words}])=>(
+                <div key={level} style={{background:C.dark2,border:`1px solid ${C.border}`}}>
+                  <div style={{padding:'10px 14px',borderBottom:`1px solid ${C.border}`,display:'flex',alignItems:'center',gap:12}}>
+                    <div style={{width:3,height:16,background:color,borderRadius:1,flexShrink:0}}/>
+                    <Tag intent={intentFor(level)}>{label}</Tag>
+                    <span style={{fontSize:12,color:C.textMuted}}>{description}</span>
+                    <span style={{fontSize:11,color:C.textDisabled,marginLeft:'auto'}}>{words.length} terms</span>
+                  </div>
+                  <div style={{padding:14,display:'flex',flexWrap:'wrap',gap:6}}>
+                    {words.map((w,i)=>(
+                      <span key={i} style={{padding:'3px 8px',background:C.dark3,border:`1px solid ${C.border}`,fontSize:11,color:C.textMuted,borderRadius:2}}>{w}</span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Paradigm Sentiment Tracker v2</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #000; color: #fff; font-family: 'Space Grotesk', system-ui, sans-serif; min-height: 100vh; }
+    .mono { font-family: 'Space Mono', monospace; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .pulse { animation: pulse 2s infinite; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: #0a0a0a; }
+    ::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 2px; }
+    ::-webkit-scrollbar-thumb:hover { background: #00D395; }
+    select option { background: #111; color: #fff; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useMemo } = React;
+
+// ── Sourced Threat Keyword Library ───────────────────────────────────────────
+// [1] DHS Media Monitoring Word List (via EPIC FOIA) https://gist.github.com/jm3/2815378
+// [2] The Grievance Dictionary — van der Vegt et al. (2021), Behavior Research Methods
+//     22 categories: weapons, murder, desperation, planning, fixation, grievance, etc.
+//     https://github.com/Isabellevdv/grievancedictionary
+// [3] Practitioner additions for crypto/VC executive protection context
+
+const THREAT_KEYWORDS = {
+  critical: {
+    label: 'Critical', color: '#FF4D4D',
+    description: 'Direct physical threat language — immediate review required',
+    sources: ['DHS [1]', 'Grievance Dict. [2]'],
+    words: [
+      'assassination','assassinate','hostage','shooting','shots fired','standoff',
+      'lockdown','bomb','explosion','explosive','pipe bomb','riot',
+      'kill','murder','execute','eliminate','shoot','stab','strangle','poison',
+      'plot','ambush','abduct','kidnap','ransom','attack',
+    ]
+  },
+  high: {
+    label: 'High', color: '#FF9F43',
+    description: 'Targeting, fixation, or weaponry signals — elevated review',
+    sources: ['DHS [1]', 'Grievance Dict. [2]'],
+    words: [
+      'target','targeting','hunt','track','locate','stalk','confront','surveillance',
+      'weapon','gun','firearm','rifle','pistol','knife','blade',
+      'nothing to lose','last resort','make them pay','will pay','deserve to die','should die',
+      'threat','breach','extremism','militia','trafficking','intimidate','extort','blackmail',
+    ]
+  },
+  medium: {
+    label: 'Medium', color: '#FFE066',
+    description: 'Reputational, legal, or coordinated attack language',
+    sources: ['Practitioner [3]'],
+    words: [
+      'fraud','manipulation','scam','investigation','lawsuit','SEC','DOJ',
+      'regulatory','scrutiny','probe','allegation','corrupt','criminal',
+      'prosecute','subpoena','indictment','expose','doxx','leak',
+      'front-running','insider trading','money laundering','exit liquidity','rug pull','ponzi',
+    ]
+  },
+  low: {
+    label: 'Low', color: '#00D395',
+    description: 'General negative sentiment — monitor for escalation',
+    sources: ['Practitioner [3]'],
+    words: [
+      'suspicious','questionable','misleading','deceptive','dishonest',
+      'problematic','unethical','shady','sketchy','grifter',
+      'parasite','leech','rigged','accountability','backlash','boycott',
+    ]
+  }
+};
+
+const ALL_KW_FLAT = Object.entries(THREAT_KEYWORDS).reduce((acc, [level, { words }]) => {
+  words.forEach(w => { acc[w.toLowerCase()] = level; }); return acc;
+}, {});
+
+function detectThreats(text) {
+  const lower = (text||'').toLowerCase();
+  const found = { critical:[], high:[], medium:[], low:[] };
+  Object.entries(ALL_KW_FLAT).forEach(([word, level]) => { if (lower.includes(word)) found[level].push(word); });
+  const topLevel = ['critical','high','medium','low'].find(l => found[l].length > 0) || 'none';
+  return { level: topLevel, matched: found };
+}
+
+const G = {
+  black: '#000', dark: '#0A0A0A', gray: '#1A1A1A', border: '#2A2A2A',
+  muted: '#666', green: '#00D395', red: '#FF4D4D', orange: '#FF9F43',
+  yellow: '#FFE066', white: '#FFF',
+};
+
+// ── Sample data generator ───────────────────────────────────────────────────
+function makeData(target) {
+  const isExec = target === 'matt_huang';
+  const base = isExec ? 120 : 247;
+  const seed = isExec ? 42 : 7;
+  const rng = (n) => ((Math.sin(n * seed) + 1) / 2);
+
+  const daily_data = Array.from({ length: 30 }, (_, i) => {
+    const count = Math.floor(rng(i * 3 + 1) * 18) + (isExec ? 3 : 6);
+    const unique_accounts = Math.floor(count * (0.6 + rng(i) * 0.3));
+    const high_severity_count = Math.floor(count * (0.05 + rng(i * 2) * 0.1));
+    const alerts_count = Math.floor(high_severity_count * (0.2 + rng(i * 5) * 0.4));
+    return {
+      date: new Date(Date.now() - (29 - i) * 86400000).toISOString().split('T')[0],
+      count, unique_accounts, high_severity_count, alerts_count,
+      avg_sentiment: (rng(i * 7) - 0.5) * (isExec ? 0.6 : 0.8),
+    };
+  });
+
+  const sources = isExec
+    ? [{ source: 'twitter', count: 54, avg_sentiment: 0.12 }, { source: 'reddit', count: 38, avg_sentiment: -0.05 }, { source: 'news_coindesk', count: 18, avg_sentiment: 0.22 }, { source: 'news_theblock', count: 10, avg_sentiment: 0.08 }]
+    : [{ source: 'reddit', count: 134, avg_sentiment: -0.08 }, { source: 'news_coindesk', count: 45, avg_sentiment: 0.15 }, { source: 'news_theblock', count: 32, avg_sentiment: 0.05 }, { source: 'twitter', count: 36, avg_sentiment: -0.22 }];
+
+  const high_severity_mentions = isExec ? [
+    { id:1, source:'twitter', title:null, content:'Matt Huang was spotted at another exclusive conference. Some people are questioning whether crypto VCs are too insular and disconnected from retail investors.', url:'#', published_at: new Date(Date.now()-3600000).toISOString(), severity_score:7.2, sentiment_score:-0.55, threat_level:'high', threat_keywords:['insular','disconnected'], employee_mentions:['Matt Huang'] },
+    { id:2, source:'reddit', title:'Discussion: Paradigm leadership', content:"Matt Huang's recent comments on regulation are drawing fire from some in the community who think he's being too cozy with legislators.", url:'#', published_at: new Date(Date.now()-10800000).toISOString(), severity_score:5.8, sentiment_score:-0.38, threat_level:'medium', threat_keywords:['cozy'], employee_mentions:['Matt Huang'] },
+  ] : [
+    { id:1, source:'reddit', title:'Concerns about Paradigm investments', content:'There have been multiple reports of questionable trading activity connected to Paradigm portfolio companies. This seems like potential market manipulation...', url:'#', published_at: new Date(Date.now()-3600000).toISOString(), severity_score:8.5, sentiment_score:-0.7, threat_level:'critical', threat_keywords:['manipulation','questionable'], employee_mentions:[] },
+    { id:2, source:'twitter', title:null, content:"Just saw Matt Huang at a conference. Someone should investigate their front-running activities. This is fraud!", url:'#', published_at: new Date(Date.now()-7200000).toISOString(), severity_score:7.8, sentiment_score:-0.65, threat_level:'high', threat_keywords:['fraud','front-running','investigate'], employee_mentions:['Matt Huang'] },
+    { id:3, source:'news_coindesk', title:'Regulatory scrutiny increases for crypto VCs', content:'Several major crypto venture capital firms including Paradigm are facing increased regulatory attention following recent market events...', url:'#', published_at: new Date(Date.now()-14400000).toISOString(), severity_score:6.2, sentiment_score:-0.35, threat_level:'medium', threat_keywords:['scrutiny'], employee_mentions:[] },
+  ];
+
+  const alerts = isExec ? [
+    { id:1, mention_id:1, alert_level:'high', alert_reason:'Executive mentioned with negative sentiment in high-engagement Twitter thread', is_reviewed:false, created_at: new Date(Date.now()-3600000).toISOString() },
+    { id:2, mention_id:2, alert_level:'medium', alert_reason:'Regulatory criticism referencing leadership by name', is_reviewed:true, created_at: new Date(Date.now()-10800000).toISOString() },
+  ] : [
+    { id:1, mention_id:1, alert_level:'critical', alert_reason:'High severity score with manipulation keywords', is_reviewed:false, created_at: new Date(Date.now()-3600000).toISOString() },
+    { id:2, mention_id:2, alert_level:'high', alert_reason:'Employee mentioned with fraud allegations', is_reviewed:false, created_at: new Date(Date.now()-7200000).toISOString() },
+    { id:3, mention_id:3, alert_level:'medium', alert_reason:'Regulatory concern in news coverage', is_reviewed:true, created_at: new Date(Date.now()-14400000).toISOString() },
+  ];
+
+  const srcLabels = ['reddit','twitter','news_coindesk','news_theblock'];
+  const recent_mentions = Array.from({ length: 30 }, (_, i) => ({
+    id: i + 10,
+    source: srcLabels[Math.floor(rng(i * 11) * 4)],
+    title: `Discussion about ${isExec ? 'Matt Huang' : 'Paradigm'} ${i + 1}`,
+    content: `Sample mention content about ${isExec ? "Matt Huang's views and investments" : "Paradigm's portfolio activity and market positioning"}. This is mention number ${i + 1} in the 30-day window.`,
+    url: '#',
+    published_at: new Date(Date.now() - Math.floor(rng(i * 13) * 86400000 * 7)).toISOString(),
+    severity_score: rng(i * 17) * 8,
+    sentiment_score: (rng(i * 19) - 0.5) * 2,
+    threat_level: ['none','low','medium','high'][Math.floor(rng(i * 23) * 4)],
+    threat_keywords: [],
+    employee_mentions: [],
+  }));
+
+  const threat_keywords = isExec
+    ? [{ keyword:'insular', count:6 },{ keyword:'cozy', count:4 },{ keyword:'disconnected', count:3 },{ keyword:'elitist', count:2 },{ keyword:'regulatory', count:2 }]
+    : [{ keyword:'manipulation', count:12 },{ keyword:'fraud', count:8 },{ keyword:'scam', count:6 },{ keyword:'investigation', count:5 },{ keyword:'suspicious', count:4 }];
+
+  const employee_mentions = [
+    { name:'Matt Huang', count: isExec ? 89 : 8, sentiment: isExec ? 0.08 : -0.15 },
+    { name:'Fred Ehrsam', count: isExec ? 12 : 5, sentiment: 0.12 },
+    { name:'Dan Robinson', count: isExec ? 8 : 3, sentiment: 0.25 },
+    { name:'Georgios K.', count: isExec ? 5 : 2, sentiment: 0.08 },
+  ];
+
+  return {
+    generated_at: new Date().toISOString(),
+    target,
+    stats: {
+      total_mentions: base,
+      unique_accounts: Math.floor(base * 0.74),
+      avg_sentiment: isExec ? 0.08 : -0.12,
+      threat_counts: isExec
+        ? { critical:1, high:4, medium:18, low:32 }
+        : { critical:3, high:12, medium:45, low:87 },
+      daily_data,
+      source_breakdown: sources,
+    },
+    high_severity_mentions,
+    alerts,
+    recent_mentions,
+    threat_keywords,
+    employee_mentions,
+  };
+}
+
+// ── Sub-components ───────────────────────────────────────────────────────────
+const Badge = ({ type, children }) => {
+  const colors = { critical:G.red, high:G.orange, medium:G.yellow, low:G.green, none:G.muted, reddit:'#FF4500', twitter:G.white, news:G.green, news_coindesk:G.green, news_theblock:G.green };
+  const c = colors[type] || G.muted;
+  return <span style={{ padding:'2px 8px', border:`1px solid ${c}`, color:c, fontSize:11, fontFamily:'Space Mono,monospace', textTransform:'uppercase', letterSpacing:'0.08em', whiteSpace:'nowrap' }}>{children}</span>;
+};
+
+const StatBlock = ({ label, value, subtext, accent }) => (
+  <div style={{ border:`1px solid ${G.border}`, padding:24 }}>
+    <div style={{ fontSize:30, fontFamily:'Space Mono,monospace', fontWeight:700, color: accent ? G.green : G.white }}>{value}</div>
+    <div style={{ color:G.muted, fontSize:11, marginTop:4, textTransform:'uppercase', letterSpacing:'0.1em' }}>{label}</div>
+    {subtext && <div style={{ color:G.muted, fontSize:11, marginTop:8, fontFamily:'Space Mono,monospace' }}>{subtext}</div>}
+  </div>
+);
+
+const AlertRow = ({ alert }) => {
+  const c = { critical:G.red, high:G.orange, medium:G.yellow }[alert.alert_level] || G.muted;
+  return (
+    <div style={{ borderLeft:`2px solid ${c}`, paddingLeft:16, paddingTop:12, paddingBottom:12, borderBottom:`1px solid ${G.border}` }}>
+      <div style={{ display:'flex', alignItems:'center', gap:12, marginBottom:6 }}>
+        <span style={{ fontFamily:'Space Mono,monospace', fontSize:11, color:G.muted }}>{new Date(alert.created_at).toLocaleString()}</span>
+        <Badge type={alert.alert_level}>{alert.alert_level}</Badge>
+        {!alert.is_reviewed && <span className="pulse" style={{ width:6, height:6, borderRadius:'50%', background:G.green, display:'inline-block' }} />}
+      </div>
+      <p style={{ fontSize:13, color:'rgba(255,255,255,0.8)' }}>{alert.alert_reason}</p>
+    </div>
+  );
+};
+
+const MentionCard = ({ mention }) => {
+  const srcType = mention.source.startsWith('news') ? 'news' : mention.source;
+  const sevColor = mention.severity_score >= 6 ? G.red : mention.severity_score >= 4 ? G.yellow : G.green;
+  return (
+    <div style={{ border:`1px solid ${G.border}`, padding:20, marginBottom:0 }}>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:12 }}>
+        <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+          <Badge type={srcType}>{mention.source.replace('news_','')}</Badge>
+          <Badge type={mention.threat_level}>{mention.threat_level||'none'}</Badge>
+        </div>
+        <div style={{ fontSize:20, fontFamily:'Space Mono,monospace', fontWeight:700, color:sevColor, flexShrink:0 }}>{mention.severity_score?.toFixed(1)}</div>
+      </div>
+      {mention.title && <h3 style={{ fontWeight:500, marginBottom:8, fontSize:14 }}>{mention.title}</h3>}
+      <p style={{ color:'rgba(255,255,255,0.6)', fontSize:13, marginBottom:16, overflow:'hidden', display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical' }}>{mention.content}</p>
+      <div style={{ display:'flex', justifyContent:'space-between', fontSize:11, fontFamily:'Space Mono,monospace' }}>
+        <span style={{ color:G.muted }}>SENT: <span style={{ color: mention.sentiment_score < -0.2 ? G.red : mention.sentiment_score > 0.2 ? G.green : G.white }}>{mention.sentiment_score?.toFixed(2)}</span></span>
+        <span style={{ color:G.muted }}>{new Date(mention.published_at).toLocaleDateString()}</span>
+      </div>
+    </div>
+  );
+};
+
+// Chart components using Chart.js
+const SentimentChartCanvas = ({ data }) => {
+  const ref = useRef(null);
+  const chartRef = useRef(null);
+  useEffect(() => {
+    if (!ref.current) return;
+    if (chartRef.current) chartRef.current.destroy();
+    chartRef.current = new Chart(ref.current, {
+      type:'line',
+      data:{
+        labels: data.map(d => d.date.slice(5)),
+        datasets:[
+          { label:'Sentiment', data:data.map(d=>d.avg_sentiment), borderColor:G.green, backgroundColor:'rgba(0,211,149,0.05)', fill:true, tension:0.4, borderWidth:1.5, pointRadius:0, yAxisID:'y' },
+          { label:'Mentions', data:data.map(d=>d.count), borderColor:G.muted, borderDash:[4,4], tension:0.4, borderWidth:1, pointRadius:0, yAxisID:'y1' },
+          { label:'Unique Accounts', data:data.map(d=>d.unique_accounts), borderColor:G.orange, tension:0.4, borderWidth:2, pointRadius:0, yAxisID:'y1' },
+        ]
+      },
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        interaction:{ mode:'index', intersect:false },
+        plugins:{ legend:{ position:'top', align:'end', labels:{ color:G.muted, font:{family:'Space Mono',size:10}, boxWidth:12, padding:16 } }, tooltip:{ backgroundColor:G.gray, titleColor:G.white, bodyColor:G.white, borderColor:G.border, borderWidth:1 } },
+        scales:{
+          x:{ grid:{ color:G.gray }, ticks:{ color:G.muted, font:{family:'Space Mono',size:9} } },
+          y:{ position:'left', min:-1, max:1, grid:{ color:G.gray }, ticks:{ color:G.green, font:{family:'Space Mono',size:9} } },
+          y1:{ position:'right', grid:{ display:false }, ticks:{ color:G.muted, font:{family:'Space Mono',size:9} } },
+        }
+      }
+    });
+    return () => { if(chartRef.current) chartRef.current.destroy(); };
+  }, [data]);
+  return <canvas ref={ref} />;
+};
+
+const AlertsTrendCanvas = ({ data, height=180 }) => {
+  const ref = useRef(null);
+  const chartRef = useRef(null);
+  useEffect(() => {
+    if (!ref.current) return;
+    if (chartRef.current) chartRef.current.destroy();
+    chartRef.current = new Chart(ref.current, {
+      type:'line',
+      data:{
+        labels: data.map(d=>d.date.slice(5)),
+        datasets:[
+          { label:'High Severity', data:data.map(d=>d.high_severity_count||0), borderColor:G.orange, backgroundColor:'rgba(255,159,67,0.1)', fill:true, tension:0.4, borderWidth:2, pointRadius:2, pointBackgroundColor:G.orange },
+          { label:'Alerts', data:data.map(d=>d.alerts_count||0), borderColor:G.red, backgroundColor:'rgba(255,77,77,0.1)', fill:true, tension:0.4, borderWidth:2, pointRadius:2, pointBackgroundColor:G.red },
+        ]
+      },
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        interaction:{ mode:'index', intersect:false },
+        plugins:{ legend:{ position:'top', align:'end', labels:{ color:G.muted, font:{family:'Space Mono',size:10}, boxWidth:12, padding:16 } }, tooltip:{ backgroundColor:G.gray, titleColor:G.white, bodyColor:G.white, borderColor:G.border, borderWidth:1 } },
+        scales:{
+          x:{ grid:{ color:G.gray }, ticks:{ color:G.muted, font:{family:'Space Mono',size:9} } },
+          y:{ beginAtZero:true, grid:{ color:G.gray }, ticks:{ color:G.muted, font:{family:'Space Mono',size:9}, stepSize:1 } },
+        }
+      }
+    });
+    return () => { if(chartRef.current) chartRef.current.destroy(); };
+  }, [data]);
+  return <canvas ref={ref} />;
+};
+
+const SourceChartCanvas = ({ data }) => {
+  const ref = useRef(null);
+  const chartRef = useRef(null);
+  useEffect(() => {
+    if (!ref.current) return;
+    if (chartRef.current) chartRef.current.destroy();
+    chartRef.current = new Chart(ref.current, {
+      type:'doughnut',
+      data:{
+        labels: data.map(d=>d.source.replace('news_','').toUpperCase()),
+        datasets:[{ data:data.map(d=>d.count), backgroundColor:['#FF4500',G.white,G.green,G.muted], borderColor:G.black, borderWidth:2 }]
+      },
+      options:{
+        responsive:true, maintainAspectRatio:false, cutout:'70%',
+        plugins:{
+          legend:{ position:'bottom', labels:{ color:G.muted, font:{family:'Space Mono',size:10}, padding:14 } },
+          tooltip:{ backgroundColor:G.gray, titleColor:G.white, bodyColor:G.white, borderColor:G.border, borderWidth:1 }
+        }
+      }
+    });
+    return () => { if(chartRef.current) chartRef.current.destroy(); };
+  }, [data]);
+  return <canvas ref={ref} />;
+};
+
+// ── Main Dashboard ────────────────────────────────────────────────────────────
+const Dashboard = () => {
+  const [target, setTarget] = useState('paradigm');
+  const [data, setData] = useState(() => makeData('paradigm'));
+  const [activeTab, setActiveTab] = useState('overview');
+  const [filter, setFilter] = useState('all');
+  const [search, setSearch] = useState('');
+
+  const switchTarget = (t) => { setTarget(t); setData(makeData(t)); setActiveTab('overview'); };
+  const refresh = () => setData(makeData(target));
+
+  const filteredMentions = useMemo(() => {
+    let items = [...data.recent_mentions, ...data.high_severity_mentions];
+    if (filter === 'high_severity') items = items.filter(m => m.severity_score >= 6);
+    else if (filter !== 'all') items = items.filter(m => m.source.includes(filter));
+    if (search) { const t = search.toLowerCase(); items = items.filter(m => m.title?.toLowerCase().includes(t) || m.content?.toLowerCase().includes(t)); }
+    return items.sort((a,b) => new Date(b.published_at)-new Date(a.published_at)).slice(0,50);
+  }, [data, filter, search]);
+
+  const unreviewed = data.alerts.filter(a => !a.is_reviewed);
+  const totalHighSev = data.stats.daily_data.reduce((s,d) => s+(d.high_severity_count||0), 0);
+  const totalAlerts = data.stats.daily_data.reduce((s,d) => s+(d.alerts_count||0), 0);
+  const recentHS = data.stats.daily_data.slice(-7).reduce((s,d)=>s+(d.high_severity_count||0),0);
+  const prevHS = data.stats.daily_data.slice(-14,-7).reduce((s,d)=>s+(d.high_severity_count||0),0);
+  const recentA = data.stats.daily_data.slice(-7).reduce((s,d)=>s+(d.alerts_count||0),0);
+  const prevA = data.stats.daily_data.slice(-14,-7).reduce((s,d)=>s+(d.alerts_count||0),0);
+  const hsChg = prevHS > 0 ? Math.round((recentHS-prevHS)/prevHS*100) : 0;
+  const aChg = prevA > 0 ? Math.round((recentA-prevA)/prevA*100) : 0;
+
+  return (
+    <div style={{ minHeight:'100vh', background:G.black }}>
+      {/* Demo banner */}
+      <div style={{ background:'rgba(0,211,149,0.08)', borderBottom:`1px solid rgba(0,211,149,0.25)`, color:G.green, padding:'8px 24px', textAlign:'center', fontSize:11, fontFamily:'Space Mono,monospace', letterSpacing:'0.08em' }}>
+        DEMO MODE — Live data loads automatically when deployed to Centaur
+      </div>
+
+      {/* Header */}
+      <header style={{ borderBottom:`1px solid ${G.border}` }}>
+        <div style={{ maxWidth:1280, margin:'0 auto', padding:'24px 24px 0' }}>
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:32 }}>
+            {/* Logo */}
+            <div style={{ display:'flex', alignItems:'center', gap:16 }}>
+              <div style={{ width:32, height:32, border:`1px solid ${G.green}`, display:'flex', alignItems:'center', justifyContent:'center' }}>
+                <div style={{ width:16, height:16, border:`1px solid ${G.green}`, transform:'rotate(45deg)' }} />
+              </div>
+              <div>
+                <h1 style={{ fontSize:17, fontWeight:500, letterSpacing:'-0.01em' }}>Paradigm</h1>
+                <p style={{ color:G.muted, fontSize:10, fontFamily:'Space Mono,monospace', textTransform:'uppercase', letterSpacing:'0.15em' }}>Sentiment Tracker</p>
+              </div>
+            </div>
+
+            <div style={{ display:'flex', alignItems:'center', gap:16 }}>
+              {/* Target switcher */}
+              <div style={{ display:'flex', border:`1px solid ${G.border}` }}>
+                {[['paradigm','@Paradigm'],['matt_huang','Matt Huang']].map(([val,label]) => (
+                  <button key={val} onClick={() => switchTarget(val)} style={{ padding:'7px 16px', background: target===val ? G.green : 'transparent', color: target===val ? G.black : G.muted, border:'none', cursor:'pointer', fontSize:11, fontFamily:'Space Mono,monospace', textTransform:'uppercase', letterSpacing:'0.06em', transition:'all 0.15s' }}>{label}</button>
+                ))}
+              </div>
+
+              {unreviewed.length > 0 && (
+                <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                  <span className="pulse" style={{ width:8, height:8, borderRadius:'50%', background:G.red, display:'inline-block' }} />
+                  <span style={{ fontSize:11, fontFamily:'Space Mono,monospace', color:G.red }}>{unreviewed.length} ALERTS</span>
+                </div>
+              )}
+              <span style={{ color:G.muted, fontSize:11, fontFamily:'Space Mono,monospace' }}>{new Date(data.generated_at).toLocaleString()}</span>
+              <button onClick={refresh} style={{ background:G.green, color:G.black, border:'none', padding:'7px 18px', fontSize:11, fontFamily:'Space Mono,monospace', textTransform:'uppercase', letterSpacing:'0.06em', cursor:'pointer' }}>↻ REFRESH</button>
+            </div>
+          </div>
+
+          {/* Tabs */}
+          <nav style={{ display:'flex', gap:32 }}>
+            {['overview','alerts','mentions','trends'].map(tab => (
+              <button key={tab} onClick={() => setActiveTab(tab)} style={{ background:'none', border:'none', cursor:'pointer', paddingBottom:12, fontSize:12, textTransform:'uppercase', letterSpacing:'0.1em', color: activeTab===tab ? G.white : G.muted, borderBottom:`2px solid ${activeTab===tab ? G.green : 'transparent'}`, transition:'color 0.15s' }}>{tab}</button>
+            ))}
+          </nav>
+        </div>
+      </header>
+
+      <main style={{ maxWidth:1280, margin:'0 auto', padding:'40px 24px' }}>
+
+        {/* OVERVIEW TAB */}
+        {activeTab === 'overview' && (<>
+          {/* Stats */}
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:1, background:G.border, marginBottom:40 }}>
+            <StatBlock label="Total Mentions" value={data.stats.total_mentions} />
+            <StatBlock label="Unique Accounts" value={data.stats.unique_accounts} subtext={`${Math.round(data.stats.unique_accounts/data.stats.total_mentions*100)}% of mentions`} />
+            <StatBlock label="Avg Sentiment" value={data.stats.avg_sentiment.toFixed(2)} accent={data.stats.avg_sentiment>0} />
+            <StatBlock label="Critical" value={data.stats.threat_counts.critical} />
+            <StatBlock label="High" value={data.stats.threat_counts.high} />
+            <StatBlock label="Medium" value={data.stats.threat_counts.medium} />
+          </div>
+
+          {/* Charts row */}
+          <div style={{ display:'grid', gridTemplateColumns:'2fr 1fr', gap:24, marginBottom:40 }}>
+            <div style={{ border:`1px solid ${G.border}`, padding:24 }}>
+              <h2 style={{ fontSize:10, fontFamily:'Space Mono,monospace', color:G.muted, textTransform:'uppercase', letterSpacing:'0.1em', marginBottom:24 }}>30-Day Trend — Sentiment, Mentions & Unique Accounts</h2>
+              <div style={{ height:240 }}><SentimentChartCanvas data={data.stats.daily_data} /></div>
+            </div>
+            <div style={{ border:`1px solid ${G.border}`, padding:24 }}>
+              <h2 style={{ fontSize:10, fontFamily:'Space Mono,monospace', color:G.muted, textTransform:'uppercase', letterSpacing:'0.1em', marginBottom:24 }}>Source Distribution</h2>
+              <div style={{ height:240 }}><SourceChartCanvas data={data.stats.source_breakdown} /></div>
+            </div>
+          </div>
+
+          {/* Alerts trend */}
+          <div style={{ border:`1px solid ${G.border}`, padding:24, marginBottom:40 }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:24 }}>
+              <h2 style={{ fontSize:10, fontFamily:'Space Mono,monospace', color:G.muted, textTransform:'uppercase', letterSpacing:'0.1em' }}>30-Day Trend — Alerts & High Severity Mentions</h2>
+              <div style={{ display:'flex', gap:20, fontSize:10, fontFamily:'Space Mono,monospace' }}>
+                <span style={{ display:'flex', alignItems:'center', gap:8 }}><span style={{ width:12, height:2, background:G.orange, display:'inline-block' }}/><span style={{ color:G.muted }}>High Severity</span></span>
+                <span style={{ display:'flex', alignItems:'center', gap:8 }}><span style={{ width:12, height:2, background:G.red, display:'inline-block' }}/><span style={{ color:G.muted }}>Alerts</span></span>
+              </div>
+            </div>
+            <div style={{ height:180 }}><AlertsTrendCanvas data={data.stats.daily_data} /></div>
+            <div style={{ marginTop:16, paddingTop:16, borderTop:`1px solid ${G.border}`, display:'grid', gridTemplateColumns:'repeat(4,1fr)', textAlign:'center', gap:16 }}>
+              {[
+                { val:totalHighSev, label:'Total High Severity', color:G.orange },
+                { val:totalAlerts, label:'Total Alerts', color:G.red },
+                { val:(totalHighSev/30).toFixed(1), label:'Avg/Day (High Sev)', color:G.white },
+                { val:(totalAlerts/30).toFixed(1), label:'Avg/Day (Alerts)', color:G.white },
+              ].map((s,i) => <div key={i}><div style={{ fontSize:24, fontFamily:'Space Mono,monospace', fontWeight:700, color:s.color }}>{s.val}</div><div style={{ fontSize:10, color:G.muted, textTransform:'uppercase', marginTop:4 }}>{s.label}</div></div>)}
+            </div>
+          </div>
+
+          {/* High severity + alerts */}
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24 }}>
+            <div style={{ border:`1px solid ${G.border}` }}>
+              <div style={{ padding:'12px 16px', borderBottom:`1px solid ${G.border}` }}>
+                <h2 style={{ fontSize:10, fontFamily:'Space Mono,monospace', color:G.muted, textTransform:'uppercase', letterSpacing:'0.1em' }}>High Severity Mentions</h2>
+              </div>
+              <div style={{ padding:16, maxHeight:400, overflowY:'auto', display:'flex', flexDirection:'column', gap:12 }}>
+                {data.high_severity_mentions.map(m => <MentionCard key={m.id} mention={m} />)}
+              </div>
+            </div>
+            <div style={{ border:`1px solid ${G.border}` }}>
+              <div style={{ padding:'12px 16px', borderBottom:`1px solid ${G.border}`, display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                <h2 style={{ fontSize:10, fontFamily:'Space Mono,monospace', color:G.muted, textTransform:'uppercase', letterSpacing:'0.1em' }}>Recent Alerts</h2>
+                {unreviewed.length > 0 && <span style={{ fontSize:10, fontFamily:'Space Mono,monospace', color:G.green }}>{unreviewed.length} NEW</span>}
+              </div>
+              <div style={{ maxHeight:400, overflowY:'auto' }}>
+                {data.alerts.map(a => <AlertRow key={a.id} alert={a} />)}
+              </div>
+            </div>
+          </div>
+        </>)}
+
+        {/* ALERTS TAB */}
+        {activeTab === 'alerts' && (
+          <div style={{ border:`1px solid ${G.border}` }}>
+            <div style={{ padding:'12px 16px', borderBottom:`1px solid ${G.border}` }}>
+              <h2 style={{ fontSize:10, fontFamily:'Space Mono,monospace', color:G.muted, textTransform:'uppercase', letterSpacing:'0.1em' }}>All Alerts</h2>
+            </div>
+            {data.alerts.map(a => <AlertRow key={a.id} alert={a} />)}
+          </div>
+        )}
+
+        {/* MENTIONS TAB */}
+        {activeTab === 'mentions' && (<>
+          <div style={{ display:'flex', gap:12, marginBottom:24 }}>
+            <input type="text" placeholder="Search mentions..." value={search} onChange={e => setSearch(e.target.value)}
+              style={{ flex:1, background:'transparent', border:`1px solid ${G.border}`, padding:'8px 16px', fontSize:13, fontFamily:'Space Mono,monospace', color:G.white, outline:'none' }} />
+            <select value={filter} onChange={e => setFilter(e.target.value)}
+              style={{ background:G.black, border:`1px solid ${G.border}`, padding:'8px 16px', fontSize:13, fontFamily:'Space Mono,monospace', color:G.white, outline:'none' }}>
+              <option value="all">All Sources</option>
+              <option value="high_severity">High Severity</option>
+              <option value="reddit">Reddit</option>
+              <option value="twitter">Twitter</option>
+              <option value="news">News</option>
+            </select>
+          </div>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
+            {filteredMentions.map(m => <MentionCard key={m.id} mention={m} />)}
+          </div>
+        </>)}
+
+        {/* TRENDS TAB */}
+        {activeTab === 'trends' && (
+          <div style={{ display:'flex', flexDirection:'column', gap:24 }}>
+            <div style={{ border:`1px solid ${G.border}`, padding:24 }}>
+              <h2 style={{ fontSize:10, fontFamily:'Space Mono,monospace', color:G.muted, textTransform:'uppercase', letterSpacing:'0.1em', marginBottom:24 }}>Sentiment & Mentions Over Time</h2>
+              <div style={{ height:240 }}><SentimentChartCanvas data={data.stats.daily_data} /></div>
+            </div>
+
+            <div style={{ border:`1px solid ${G.border}`, padding:24 }}>
+              <h2 style={{ fontSize:10, fontFamily:'Space Mono,monospace', color:G.muted, textTransform:'uppercase', letterSpacing:'0.1em', marginBottom:24 }}>Alerts & High Severity Over Time</h2>
+              <div style={{ height:240 }}><AlertsTrendCanvas data={data.stats.daily_data} /></div>
+              <div style={{ marginTop:16, paddingTop:16, borderTop:`1px solid ${G.border}`, display:'grid', gridTemplateColumns:'repeat(4,1fr)', textAlign:'center', gap:16 }}>
+                {[
+                  { val:recentHS, label:'High Severity (7d)', color:G.orange },
+                  { val:`${hsChg>0?'+':''}${hsChg}%`, label:'vs Previous Week', color: hsChg>0?G.red:hsChg<0?G.green:G.white },
+                  { val:recentA, label:'Alerts (7d)', color:G.red },
+                  { val:`${aChg>0?'+':''}${aChg}%`, label:'vs Previous Week', color: aChg>0?G.red:aChg<0?G.green:G.white },
+                ].map((s,i) => <div key={i}><div style={{ fontSize:24, fontFamily:'Space Mono,monospace', fontWeight:700, color:s.color }}>{s.val}</div><div style={{ fontSize:10, color:G.muted, textTransform:'uppercase', marginTop:4 }}>{s.label}</div></div>)}
+              </div>
+            </div>
+
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24 }}>
+              <div style={{ border:`1px solid ${G.border}`, padding:24 }}>
+                <h2 style={{ fontSize:10, fontFamily:'Space Mono,monospace', color:G.muted, textTransform:'uppercase', letterSpacing:'0.1em', marginBottom:4 }}>Top Threat Keywords</h2>
+                <p style={{ fontSize:10, color:'#444', fontFamily:'Space Mono,monospace', marginBottom:20 }}>Detected in mentions this period</p>
+                {data.threat_keywords.map((kw,i) => {
+                  const level = ALL_KW_FLAT[kw.keyword.toLowerCase()] || 'low';
+                  const c = THREAT_KEYWORDS[level]?.color || G.green;
+                  return (
+                    <div key={i} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:14 }}>
+                      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                        <span style={{ width:6, height:6, borderRadius:'50%', background:c, display:'inline-block', flexShrink:0 }} />
+                        <span style={{ fontFamily:'Space Mono,monospace', fontSize:13 }}>{kw.keyword}</span>
+                      </div>
+                      <div style={{ display:'flex', alignItems:'center', gap:12 }}>
+                        <div style={{ width:96, height:2, background:G.border }}>
+                          <div style={{ height:'100%', background:c, width:`${(kw.count/data.threat_keywords[0].count)*100}%` }} />
+                        </div>
+                        <span style={{ fontFamily:'Space Mono,monospace', fontSize:11, color:G.muted, width:20, textAlign:'right' }}>{kw.count}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ border:`1px solid ${G.border}`, padding:24 }}>
+                <h2 style={{ fontSize:10, fontFamily:'Space Mono,monospace', color:G.muted, textTransform:'uppercase', letterSpacing:'0.1em', marginBottom:24 }}>Employee Mentions</h2>
+                {data.employee_mentions.map((em,i) => (
+                  <div key={i} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', paddingBottom:12, marginBottom:12, borderBottom:`1px solid ${G.border}` }}>
+                    <span style={{ fontSize:13 }}>{em.name}</span>
+                    <div style={{ display:'flex', gap:20, fontFamily:'Space Mono,monospace', fontSize:11 }}>
+                      <span style={{ color: em.sentiment<0 ? G.red : G.green }}>{em.sentiment>0?'+':''}{em.sentiment.toFixed(2)}</span>
+                      <span style={{ color:G.muted }}>{em.count}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          {/* Keyword reference panel */}
+          <div style={{ border:`1px solid ${G.border}`, padding:24 }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:20 }}>
+              <div>
+                <h2 style={{ fontSize:10, fontFamily:'Space Mono,monospace', color:G.muted, textTransform:'uppercase', letterSpacing:'0.1em', marginBottom:4 }}>Threat Keyword Reference Library</h2>
+                <p style={{ fontSize:10, color:'#444', fontFamily:'Space Mono,monospace' }}>
+                  Sources: DHS Media Monitoring List (EPIC FOIA) · The Grievance Dictionary, van der Vegt et al. 2021 · Practitioner additions
+                </p>
+              </div>
+              <div style={{ display:'flex', gap:8 }}>
+                {Object.entries(THREAT_KEYWORDS).map(([level, { label, color }]) => (
+                  <span key={level} style={{ padding:'3px 10px', border:`1px solid ${color}`, color, fontSize:10, fontFamily:'Space Mono,monospace', textTransform:'uppercase' }}>{label}</span>
+                ))}
+              </div>
+            </div>
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:16 }}>
+              {Object.entries(THREAT_KEYWORDS).map(([level, { label, color, description, sources, words }]) => (
+                <div key={level} style={{ borderLeft:`2px solid ${color}`, paddingLeft:14 }}>
+                  <div style={{ fontSize:11, fontFamily:'Space Mono,monospace', color, textTransform:'uppercase', letterSpacing:'0.08em', marginBottom:4 }}>{label}</div>
+                  <div style={{ fontSize:10, color:'#555', marginBottom:10, lineHeight:1.5 }}>{description}</div>
+                  <div style={{ fontSize:9, color:'#444', fontFamily:'Space Mono,monospace', marginBottom:10 }}>
+                    {sources.join(' · ')}
+                  </div>
+                  <div style={{ display:'flex', flexWrap:'wrap', gap:4 }}>
+                    {words.map((w,i) => (
+                      <span key={i} style={{ fontSize:10, fontFamily:'Space Mono,monospace', color:'#666', background:'#111', padding:'2px 6px', border:`1px solid #1e1e1e` }}>{w}</span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+        )}
+      </main>
+
+      <footer style={{ borderTop:`1px solid ${G.border}`, padding:'32px 24px', marginTop:40, textAlign:'center' }}>
+        <p style={{ color:G.muted, fontSize:10, fontFamily:'Space Mono,monospace', textTransform:'uppercase', letterSpacing:'0.15em' }}>Paradigm Sentiment Tracker v2 — Internal Security Tool — Powered by Centaur AI</p>
+      </footer>
+    </div>
+  );
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(<Dashboard />);
+</script>
+</body>
+</html>
